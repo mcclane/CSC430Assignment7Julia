@@ -33,3 +33,6 @@ Has:
 - Dynamically typed
     + but you can add types to variables and functions to help catch errors
         - adding types to your code does not make it faster
+
+# Would I take a job writing it?
+Yes
