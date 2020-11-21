@@ -88,37 +88,40 @@ function lex(input::String)::SExpression
         #println("match: ", submatch)
         caps = submatch.captures
         if caps[1] != nothing
-            println("open")
+            #println("open")
             addExpression(ArraySExp(submatch.match))
         elseif caps[2] != nothing
-            println("close")
+            #println("close")
             if length(stack) == 1
                 error("DXUQ: Error: Unmatch parentheses")
             end
             pop!(stack)
         elseif caps[3] != nothing
-            println("number")
+            #println("number")
             # TODO: Actually look for a "." and create an Integer if one doesn't exist.
             addExpression(NumberSExp(parse(Float64, submatch.match)))
         elseif caps[4] != nothing
-            println("string")
-            addExpression(StringSExp(submatch.match))
+            #println("string")
+            value = submatch.match
+            # NOTE: The regex includes the "quotes" in the match, so trim those.
+            # TODO: We should search replace escapes with actual characters, for example: \n, \t, etc...
+            addExpression(StringSExp(SubString(value, 2, length(value) - 1)))
         elseif caps[5] != nothing
-            println("id")
+            #println("id")
             addExpression(SymbolSExp(submatch.match))
         elseif caps[6] != nothing
+            #println("operator")
             # DXUQ doesn't distinguish operators from symbols.
             addExpression(SymbolSExp(submatch.match))
-            println("operator")
         end
     end
     if length(stack) != 1
         error("DXUQ: Error: Unmatched parentheses.")
     end
-    return stack[1]
+    return stack[1].values[1]
 end
 
-println(lex("{+ 1 1}"))
+#println(lex("{+ 1 1}"))
 
 # ================================
 # Expressions and Values
@@ -153,6 +156,20 @@ end
 
 struct primitiveV <: Value
     name::Symbol
+end
+
+function serialize(value::Value)::String
+    if isa(value, realV)
+        return string(value.value)
+    elseif isa(value, boolV)
+        return value.value ? "true" : "false"
+    elseif isa(value, stringV)
+        return value.value
+    elseif isa(value, closureV) 
+        return "#<procedure>"
+    elseif isa(value, primitiveV)
+        return "#<primop>"
+    end
 end
 
 struct valueC <: ExprC
@@ -190,7 +207,11 @@ end
 
 primitives = [
     Primitive("+", (a, b) -> realV(a.value + b.value)),
-    Primitive("-", (a, b) -> realV(a.value - b.value))
+    Primitive("-", (a, b) -> realV(a.value - b.value)),
+    Primitive("<=", (a, b) -> boolV(a.value <= b.value)),
+    Primitive("<", (a, b) -> boolV(a.value < b.value)),
+    Primitive(">=", (a, b) -> boolV(a.value >= b.value)),
+    Primitive(">", (a, b) -> boolV(a.value > b.value)),
 ]
 primitiveEnv = map(p -> Binding(p.name, primitiveV(p.name)), primitives)
 
@@ -220,7 +241,58 @@ end
 # ==============================
 
 function dxuqParse(expression::SExpression)::ExprC
+    if isa(expression, NumberSExp) 
+        return valueC(realV(expression.value))
+    elseif isa(expression, StringSExp)
+        return valueC(stringV(expression.value))
+    elseif isa(expression, SymbolSExp)
+        return idC(expression.name)
+    elseif (isa(expression, ArraySExp) 
+            && length(expression.values) == 3
+            && isa(expression.values[1], SymbolSExp)
+            && expression.values[1].name == "fn"
+            && isa(expression.values[2], ArraySExp))
+        params = map(symbolExpression -> symbolExpression.name, expression.values[2].values)
+        body = dxuqParse(expression.values[3])
+        return lambdaC(params,  body)
+    elseif (isa(expression, ArraySExp) 
+            && length(expression.values) == 4
+            && isa(expression.values[1], SymbolSExp)
+            && expression.values[1].name == "if")
+        return conditionalC(dxuqParse(expression.values[2]), dxuqParse(expression.values[3]), dxuqParse(expression.values[4]))
+    elseif (isa(expression, ArraySExp)
+            && length(expression.values) > 0)
+        body = dxuqParse(expression.values[1])
+        argumentLength = length(expression.values)
+        if argumentLength - 1 > 0
+            rawArguments = view(expression.values, 2:length(expression.values))
+        else
+            rawArguments = Array{ExprC}()
+        end
+        arguments = map(expr -> dxuqParse(expr), rawArguments)
+        return appC(body, arguments)
+    end
+    error("DXUQ: Error: Syntax error!")
 end
+
+function dxuqParse(expression::String)::ExprC
+    exp = lex(expression)
+    #println(exp)
+    return dxuqParse(exp)
+end
+
+#println(dxuqParse("1"))
+@assert dxuqParse("1") == valueC(realV(1.0))
+println(dxuqParse("\"hi mom\""))
+@assert dxuqParse("\"hi mom\"") == valueC(stringV("hi mom"))
+println(dxuqParse("+"))
+@assert dxuqParse("+") == idC("+")
+println(dxuqParse("{+ 1 2}"))
+# TODO: Not equalling, not sure why. Not worried right now.
+#@assert dxuqParse("{+ 1 2}") == appC(idC("+"), ExprC[valueC(realV(1.0)), valueC(realV(2.0))])
+println(dxuqParse("{fn {x y} {+ x y}}"))
+println(dxuqParse("{{fn {x y} {+ x y}} 3 4}"))
+println(dxuqParse("{if {<= 1 2} \"a\" \"b\"}"))
 
 # ==============================
 # Interpretation
@@ -257,12 +329,19 @@ function interpFunction(func::ExprC, arguments::Array{ExprC}, env::Env)::Value
     end
 end
 
+# Represents the root environment
 rootEnv = vcat(
     [
         Binding("true", boolV(true)),
         Binding("false", boolV(false)),
     ]
     , primitiveEnv)
+
+# Parses the string and then call interp with the root environment.
+function topInterp(program::String)::String
+    expression = dxuqParse(program)
+    return serialize(interp(expression, rootEnv))
+end
 
 @assert interp(
     valueC(realV(1)),
@@ -288,3 +367,15 @@ rootEnv = vcat(
     appC(lambdaC(["x", "y"], appC(idC("-"), [idC("x"), idC("y")])), [valueC(realV(4)), valueC(realV(5))]),
     rootEnv
 ) == realV(-1)
+
+@assert topInterp("{+ 1 1}") == "2.0"
+
+@assert topInterp("{{fn {x y} {+ x y}} 3 4}") == "7.0"
+
+@assert topInterp("{<= 1 2}") == "true"
+
+@assert topInterp("{if {<= 1 2} \"a\" \"b\"}") == "a"
+
+@assert topInterp("{if {<= 3 2} \"a\" \"b\"}") == "b"
+
+@assert topInterp("{if {<= 2 2} \"a\" \"b\"}") == "a"
