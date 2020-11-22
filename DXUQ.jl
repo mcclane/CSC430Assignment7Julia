@@ -96,20 +96,16 @@ function lex(input::String)::SExpression
         #println("match: ", submatch)
         captures = submatch.captures
         if captures[1] != nothing
-            #println("open")
             addExpression(ArraySExp(submatch.match))
         elseif captures[2] != nothing
-            #println("close")
             if length(stack) == 1
                 throw(DXUQError("Unmatch parentheses"))
             end
             pop!(stack)
         elseif captures[3] != nothing
-            #println("number")
             # TODO: Actually look for a "." and create an Integer if one doesn't exist.
             addExpression(NumberSExp(parse(Float64, submatch.match)))
         elseif captures[4] != nothing
-            #println("string")
             value = submatch.match
             # NOTE: The regex includes the "quotes" in the match, so trim those.
             # TODO: We should search replace escapes with actual characters, for example: \n, \t, etc...
@@ -118,10 +114,8 @@ function lex(input::String)::SExpression
             raw = replace(raw, "\\n" => "\n")
             addExpression(StringSExp(raw))
         elseif captures[5] != nothing
-            #println("id")
             addExpression(SymbolSExp(submatch.match))
         elseif captures[6] != nothing
-            #println("operator")
             # DXUQ doesn't distinguish operators from symbols.
             addExpression(SymbolSExp(submatch.match))
         end
@@ -131,8 +125,6 @@ function lex(input::String)::SExpression
     end
     return stack[1].values[1]
 end
-
-#println(lex("{+ 1 1}"))
 
 # ================================
 # Expressions and Values
@@ -181,6 +173,11 @@ struct primitiveV <: Value
     name::Symbol            # The name of the primitive to call.
 end
 
+# Defines an array
+struct arrayV <: Value
+    values::Vector{Value}
+end
+
 # Defines the void type.
 struct voidV <: Value end
 
@@ -196,6 +193,8 @@ function serialize(value::Value)::String
         return "#<procedure>"
     elseif isa(value, primitiveV)
         return "#<primop>"
+    elseif isa(value, arrayV)
+        return "#<array>"
     elseif isa(value, voidV)
         return "Void"
     end
@@ -213,6 +212,8 @@ function printable(value::Value)::String
         return string("{fn {", join(value.args, " "), "} ", unparse(value.body))
     elseif isa(value, primitiveV)
         return string("{", value.name, " ...}")
+    elseif isa(value, arrayV)
+        return string("{array ", join(map(v -> printable(v), value.values), " "), "}")
     elseif isa(value, voidV)
         return "Void"
     end
@@ -221,13 +222,6 @@ end
 # Defines a value ExprC
 struct valueC <: ExprC
     value::Value                # The value
-end
-
-# Defines a conditional ExprC. NOTE: Should be a primitive, but we didn't support that in Julia.
-struct conditionalC <: ExprC
-    condition::ExprC            # An expression that must evaluate to a boolean
-    ifblock::ExprC              # The block to interpret if condition is true.
-    elseblock::ExprC            # The block to interpret if condition is false.
 end
 
 # Defines an identifier.
@@ -257,18 +251,55 @@ end
 # Primitives
 # ==============================
 
+# The "body" or lambda of the primitive
+abstract type PrimitiveBody end
+
+# The value form of the primitive
+struct PrimitiveValueBody <: PrimitiveBody
+    body::Function
+end
+
+# The expression form of the primitive
+struct PrimitiveExpressionBody <: PrimitiveBody
+    body::Function
+end
+
 # Defines a primitive, which is a name / body pair.
 struct Primitive
     name::Symbol
-    body
+    body::PrimitiveBody
+end
+
+ArrayOrTuple = Union{Array, Tuple}
+
+# Checks that the array passed in has count N, or throws an error
+function checkLength(name::Symbol, a::ArrayOrTuple, expected::Integer)
+    if length(a) != expected
+        throw(DXUQError(string("Incorrect number of parameters to '", name, "'. Expected ", expected, " got ", length(a))))
+    end
+end
+
+# Checks a range and throws an error if index is not in range.
+function checkRange(name::Symbol, lower::Integer, upper::Integer, index::Integer)
+    if index < lower || index >= upper
+        throw(DXUQError(string(name, ": Index ", index, " of out range [", lower, "...", upper - 1, "]")))
+    end
 end
 
 # Returns a Float64 or throws an error
-function realOrError(value::Value)
+function realOrError(value::Value)::Real
     if isa(value, realV)
         return value.value
     end
     throw(DXUQError("Expected a number."))
+end
+
+# Returns a Int64 or throws an error
+function integerOrError(value::Value)::Integer
+    if isa(value, realV) && value.value == floor(value.value)
+        return value.value
+    end
+    throw(DXUQError("Expected an integer"))
 end
 
 # If value is a boolV, returns a Boolean, otherwise throws an error.
@@ -277,6 +308,14 @@ function boolOrError(value::Value)
         return value.value
     end
     throw(DXUQError("Expected a boolean."))
+end
+
+# If value is an array, return's it's values.
+function arrayOrError(value::Value)::Array{Value}
+    if value isa arrayV
+        return value.values
+    end
+    throw(DXUQError("Expected an array."))
 end
 
 # Returns true if the two values are equal. Doesn't currently follow the defined rules of DXUQ.
@@ -307,20 +346,99 @@ function primitiveBegin(values...)::Value
     return last(values)
 end
 
+# Implements "and" with short circuiting
+function primitiveAnd(expressions::Array{ExprC}, env::Env)::Value
+    checkLength("and", expressions, 2)
+    left = boolOrError(interp(expressions[1], env))
+    if !left 
+        return boolV(false)
+    end
+    return boolV(boolOrError(interp(expressions[2], env)))
+end
+
+# Implements "or" with short circuiting
+function primitiveOr(expressions::Array{ExprC}, env::Env)::Value
+    checkLength("or", expressions, 2)
+    left = boolOrError(interp(expressions[1], env))
+    if left 
+        return boolV(true)
+    end
+    return boolV(boolOrError(interp(expressions[2], env)))
+end
+
+# Implements "xor" with short circuiting
+function primitiveXor(values...)::Value
+    checkLength("xor", values, 2)
+    left = boolOrError(values[1])
+    right = boolOrError(values[2])
+    return boolV((left && !right) || (!left && right))
+end
+
+# Implements "if" with short circuiting
+function primitiveIf(expressions::Array{ExprC}, env::Env)::Value
+    checkLength("if", expressions, 3)
+    if boolOrError(interp(expressions[1], env))
+        return interp(expressions[2], env)
+    end
+    return interp(expressions[3], env)
+end
+
+function primitiveNewArray(values...)::Value
+    checkLength("new-array", values, 2)
+    count = integerOrError(values[1])
+    if count <= 1
+        throw(DXUQError("Arrays must have at least one element"))
+    end
+    return arrayV(fill(values[2], count))
+end
+
+function primitiveArray(values...)::Value
+    if length(values) <= 1
+        throw(DXUQError("Arrays must have at least one element"))
+    end
+    return arrayV([i for i in values])
+end
+
+function primitiveARef(values...)::Value
+    checkLength("aref", values, 2)
+    arrayValues = arrayOrError(values[1])
+    index = integerOrError(values[2])
+    checkRange("aref", 0, length(arrayValues), index)
+    return arrayValues[index + 1] # Julia indexes from 1.
+end
+
+function primitiveASet!(values...)::Value
+    checkLength("aset!", values, 3)
+    arrayValues = arrayOrError(values[1])
+    index = integerOrError(values[2])
+    checkRange("aset!", 0, length(arrayValues), index)
+    existing = arrayValues[index + 1] # Julia indexes from 1.
+    arrayValues[index + 1] = values[3]
+    return existing
+end
+
 # A dictionary of primitives.
 primitives = Dict([
-    "+" => Primitive("+", (a, b) -> realV(realOrError(a) + realOrError(b))),
-    "-" => Primitive("-", (a, b) -> realV(realOrError(a) - realOrError(b))),
-    "*" => Primitive("*", (a, b) -> realV(realOrError(a) * realOrError(b))),
-    "/" => Primitive("/", primitiveDivide),
-    "<=" => Primitive("<=", (a, b) -> boolV(realOrError(a) <= realOrError(b))),
-    "<" => Primitive("<", (a, b) -> boolV(realOrError(a) < realOrError(b))),
-    ">=" => Primitive(">=", (a, b) -> boolV(realOrError(a) >= realOrError(b))),
-    ">" => Primitive(">", (a, b) -> boolV(realOrError(a) > realOrError(b))),
-    "not" => Primitive("not", (a) -> boolV(!boolOrError(a))),
-    "equal?" => Primitive("equal?", primitiveEqual),
-    "print" => Primitive("print", primitivePrint),
-    "begin" => Primitive("begin", primitiveBegin),
+    "+"         => Primitive("+",         PrimitiveValueBody((a, b) -> realV(realOrError(a) + realOrError(b)))),
+    "-"         => Primitive("-",         PrimitiveValueBody((a, b) -> realV(realOrError(a) - realOrError(b)))),
+    "*"         => Primitive("*",         PrimitiveValueBody((a, b) -> realV(realOrError(a) * realOrError(b)))),
+    "/"         => Primitive("/",         PrimitiveValueBody(primitiveDivide)),
+    "<="        => Primitive("<=",        PrimitiveValueBody((a, b) -> boolV(realOrError(a) <= realOrError(b)))),
+    "<"         => Primitive("<",         PrimitiveValueBody((a, b) -> boolV(realOrError(a) < realOrError(b)))),
+    ">="        => Primitive(">=",        PrimitiveValueBody((a, b) -> boolV(realOrError(a) >= realOrError(b)))),
+    ">"         => Primitive(">",         PrimitiveValueBody((a, b) -> boolV(realOrError(a) > realOrError(b)))),
+    "not"       => Primitive("not",       PrimitiveValueBody((a) -> boolV(!boolOrError(a)))),
+    "equal?"    => Primitive("equal?",    PrimitiveValueBody(primitiveEqual)),
+    "print"     => Primitive("print",     PrimitiveValueBody(primitivePrint)),
+    "begin"     => Primitive("begin",     PrimitiveValueBody(primitiveBegin)),
+    "and"       => Primitive("and",       PrimitiveExpressionBody(primitiveAnd)),
+    "or"        => Primitive("or",        PrimitiveExpressionBody(primitiveOr)),
+    "xor"       => Primitive("xor",       PrimitiveValueBody(primitiveXor)),
+    "if"        => Primitive("if",        PrimitiveExpressionBody(primitiveIf)),
+    "new-array" => Primitive("new-array", PrimitiveValueBody(primitiveNewArray)),
+    "array"     => Primitive("array",     PrimitiveValueBody(primitiveArray)),
+    "aref"      => Primitive("aref",      PrimitiveValueBody(primitiveARef)),
+    "aset!"     => Primitive("aset!",     PrimitiveValueBody(primitiveASet!)),
 ])
 
 # Returns the primitives as they'd be defined in an environment.
@@ -410,11 +528,6 @@ function dxuqParse(expression::SExpression)::ExprC
         body = dxuqParse(expression.values[3])
         return lambdaC(params,  body)
     end
-    if (isa(expression, ArraySExp) 
-            && length(expression.values) == 4
-            && isSymbol(expression.values[1], "if"))
-        return conditionalC(dxuqParse(expression.values[2]), dxuqParse(expression.values[3]), dxuqParse(expression.values[4]))
-    end
     if (isa(expression, ArraySExp)
             && length(expression.values) >= 4
             && isSymbol(expression.values[1], "let"))
@@ -501,12 +614,6 @@ function interp(expression::ExprC, env::Env)::Value
     elseif isa(expression, setC)
         envSet!(env, expression.variable, interp(expression.argument, env))
         return voidV()
-    elseif isa(expression, conditionalC)
-        if interp(expression.condition, env).value
-            return interp(expression.ifblock, env)
-        else
-            return interp(expression.elseblock, env)
-        end
     elseif isa(expression, lambdaC)
         return closureV(expression.args, expression.body, env)
     elseif isa(expression, appC)
@@ -524,9 +631,13 @@ function interpFunction(func::ExprC, arguments::Array{ExprC}, env::Env)::Value
         newEnv = vcat(closure.env, map(t -> Binding(t[1], t[2]), zip(closure.args, argValues)))
         return interp(closure.body, newEnv)
     elseif isa(closure, primitiveV)
-        argValues = map(a -> interp(a, env), arguments)
         body = primitiveGet(primitives, closure.name)
-        return body(argValues...)
+        if body isa PrimitiveValueBody
+            argValues = map(a -> interp(a, env), arguments)
+            return body.body(argValues...)   
+        elseif body isa PrimitiveExpressionBody
+            return body.body(arguments, env)
+        end
     end
 end
 
@@ -535,6 +646,7 @@ rootEnv = vcat(
     [
         Binding("true", boolV(true)),
         Binding("false", boolV(false)),
+        Binding("void", voidV()),
     ]
     , primitiveEnv)
 
@@ -552,16 +664,6 @@ end
     valueC(realV(1)),
     rootEnv
 ) == realV(1)
-
-@test interp(
-    conditionalC(idC("true"), valueC(realV(1)), valueC(realV(0))),
-    rootEnv
-) == realV(1)
-
-@test interp(
-    conditionalC(idC("false"), valueC(realV(1)), valueC(realV(0))),
-    rootEnv
-) == realV(0)
 
 @test interp(
     appC(lambdaC(["x", "y"], appC(idC("+"), [idC("x"), idC("y")])), [valueC(realV(4)), valueC(realV(5))]),
@@ -591,7 +693,7 @@ end
 @test topInterp("{if {<= 3 2} \"a\" \"b\"}") == "\"b\""
 @test topInterp("{if {<= 2 2} \"a\" \"b\"}") == "\"a\""
 @test topInterp("{if {not {equal? 1 2}} \"a\" \"b\"}") == "\"a\""
-@test topInterp("{print 1 \"\\n\" 2 \"\\n\" 3 \"\\n\" \"hi\" \"\\n\" {fn {a b} {+ a b}} \"\\n\"}") == "Void"
+@test topInterp("{print 1 \"\\n\" 2 \"\\n\" 3 \"\\n\" \"hi\" \"\\n\" {fn {a b} {+ a b}} \"\\n\" {new-array 5 \"a\"} \"\\n\" {array 1 2 3 4 \"a\"} \"\\n\"}") == "Void"
 @test topInterp("{begin 1 2 3}") == "3.0"
 @test unparse(dxuqParse("{+ 1 1}")) == "{+ 1.0 1.0}"
 @test unparse(dxuqParse("{fn {a b} {+ a b}}")) == "{fn {a b} {+ a b}}"
@@ -606,3 +708,22 @@ simpleTest = """{let
 
 @test unparse(dxuqParse("{let {a = 10} in {begin {a := 5} a}}")) == "{{fn {a} {begin {a := 5.0} a}} 10.0}"
 @test topInterp("{let {a = 10} in {begin {a := 5} a}}") == "5.0"
+
+@test topInterp("{and true true}") == "true"
+@test topInterp("{and true false}") == "false"
+@test topInterp("{and false true}") == "false"
+@test topInterp("{and false false}") == "false"
+@test topInterp("{or true true}") == "true"
+@test topInterp("{or true false}") == "true"
+@test topInterp("{or false true}") == "true"
+@test topInterp("{or false false}") == "false"
+@test topInterp("{xor true true}") == "false"
+@test topInterp("{xor true false}") == "true"
+@test topInterp("{xor false true}") == "true"
+@test topInterp("{xor false false}") == "false"
+@test topInterp("{aref {array 1 2 3 4 5} 0}") == "1.0"
+@test topInterp("{aref {array 1 2 3 4 5} 2}") == "3.0"
+@test topInterp("{aref {array 1 2 3 4 5} 4}") == "5.0"
+@test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} 5}")
+@test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} -1}")
+@test topInterp("{let {a = {array 1 2 3 4 5}} in {begin {aset! a 2 \"a\"} {aref a 2}}}") == "\"a\""
