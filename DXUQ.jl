@@ -1,4 +1,12 @@
 
+using Test
+
+# Defines an error for us to use.
+struct DXUQError <: Exception
+    msg::String
+end
+
+# Makes Symbol a string. Julia has a Symbol type, but we're taking the easy route.
 Symbol = String
 
 #
@@ -79,44 +87,47 @@ function lex(input::String)::SExpression
                 end
             end
         else
-            error("DXUQ: Error: Unmatched parentheses")
+            throw(DXUQError("Unmatched parentheses"))
         end
     end
 
     # Now enumerate the input with our monster regular expression.
     for submatch in eachmatch(fullRx, input)
         #println("match: ", submatch)
-        caps = submatch.captures
-        if caps[1] != nothing
+        captures = submatch.captures
+        if captures[1] != nothing
             #println("open")
             addExpression(ArraySExp(submatch.match))
-        elseif caps[2] != nothing
+        elseif captures[2] != nothing
             #println("close")
             if length(stack) == 1
-                error("DXUQ: Error: Unmatch parentheses")
+                throw(DXUQError("Unmatch parentheses"))
             end
             pop!(stack)
-        elseif caps[3] != nothing
+        elseif captures[3] != nothing
             #println("number")
             # TODO: Actually look for a "." and create an Integer if one doesn't exist.
             addExpression(NumberSExp(parse(Float64, submatch.match)))
-        elseif caps[4] != nothing
+        elseif captures[4] != nothing
             #println("string")
             value = submatch.match
             # NOTE: The regex includes the "quotes" in the match, so trim those.
             # TODO: We should search replace escapes with actual characters, for example: \n, \t, etc...
-            addExpression(StringSExp(SubString(value, 2, length(value) - 1)))
-        elseif caps[5] != nothing
+            raw = SubString(value, 2, length(value) - 1)
+            # Not efficient, but good enough for now.
+            raw = replace(raw, "\\n" => "\n")
+            addExpression(StringSExp(raw))
+        elseif captures[5] != nothing
             #println("id")
             addExpression(SymbolSExp(submatch.match))
-        elseif caps[6] != nothing
+        elseif captures[6] != nothing
             #println("operator")
             # DXUQ doesn't distinguish operators from symbols.
             addExpression(SymbolSExp(submatch.match))
         end
     end
     if length(stack) != 1
-        error("DXUQ: Error: Unmatched parentheses.")
+        throw(DXUQError("Unmatched parentheses."))
     end
     return stack[1].values[1]
 end
@@ -127,38 +138,71 @@ end
 # Expressions and Values
 # ================================
 
+# Type of all expressions
 abstract type ExprC end
+
+# Type of all values
 abstract type Value end
 
-struct Binding
+# Types defines a binding in the environment
+mutable struct Binding
     name::Symbol
     value::Value
 end
+
+# An environment is just an array of Bindings.
 Env = Array{Binding}
 
+# Defines a closure
 struct closureV <: Value
-    args::Array{String}
-    body::ExprC
-    env::Env
+    args::Array{String}     # The arguments
+    body::ExprC             # The body 
+    env::Env                # The captures environment
 end
 
+# Defines a number
 struct realV <: Value
-    value::Real
+    value::Real             # Its value
 end
 
+# Defines a boolean. 
+# NOTE: Julia may support singletongs, and if it does, we should make one for true and false.
 struct boolV <: Value
-    value::Bool
+    value::Bool             # Its value
 end
 
+# Defines a string.
 struct stringV <: Value
-    value::String
+    value::String           # Its value
 end
 
+# Defines a call to a primitive
 struct primitiveV <: Value
-    name::Symbol
+    name::Symbol            # The name of the primitive to call.
 end
 
+# Defines the void type.
+struct voidV <: Value end
+
+# Converts Value to a String.
 function serialize(value::Value)::String
+    if isa(value, realV)
+        return string(value.value)
+    elseif isa(value, boolV)
+        return value.value ? "true" : "false"
+    elseif isa(value, stringV)
+        return string("\"", value.value, "\"")
+    elseif isa(value, closureV) 
+        return "#<procedure>"
+    elseif isa(value, primitiveV)
+        return "#<primop>"
+    elseif isa(value, voidV)
+        return "Void"
+    end
+end
+
+# Converts the value to a nice string for printing.
+function printable(value::Value)::String
     if isa(value, realV)
         return string(value.value)
     elseif isa(value, boolV)
@@ -166,101 +210,224 @@ function serialize(value::Value)::String
     elseif isa(value, stringV)
         return value.value
     elseif isa(value, closureV) 
-        return "#<procedure>"
+        return string("{fn {", join(value.args, " "), "} ", unparse(value.body))
     elseif isa(value, primitiveV)
-        return "#<primop>"
+        return string("{", value.name, " ...}")
+    elseif isa(value, voidV)
+        return "Void"
     end
 end
 
+# Defines a value ExprC
 struct valueC <: ExprC
-    value::Value
+    value::Value                # The value
 end
 
+# Defines a conditional ExprC. NOTE: Should be a primitive, but we didn't support that in Julia.
 struct conditionalC <: ExprC
-    condition::ExprC
-    ifblock::ExprC
-    elseblock::ExprC
+    condition::ExprC            # An expression that must evaluate to a boolean
+    ifblock::ExprC              # The block to interpret if condition is true.
+    elseblock::ExprC            # The block to interpret if condition is false.
 end
 
+# Defines an identifier.
 struct idC <: ExprC
-    name::Symbol
+    name::Symbol                # The identifier's name.
 end
 
+# Defines a function application (Call).
 struct appC <: ExprC
-    func::ExprC
-    arguments::Array{ExprC}
+    func::ExprC                 # The function's code.
+    arguments::Array{ExprC}     # Its arguments. Will be evaluated before call.
 end
 
-struct lambdaC <: ExprC
-    args::Array{Symbol}
-    body::ExprC
+# Defines a lambda calculus function
+struct lambdaC <: ExprC 
+    args::Array{Symbol}         # Its named parameters
+    body::ExprC                 # Its body to interpret
+end
+
+# Defines an assignment.
+struct setC <: ExprC 
+    variable::Symbol            # The symbol to assign to (in current environment)
+    argument::ExprC             # The expression to evaluate and then assign.
 end
 
 # ==============================
 # Primitives
 # ==============================
 
+# Defines a primitive, which is a name / body pair.
 struct Primitive
-    name
+    name::Symbol
     body
 end
 
-primitives = [
-    Primitive("+", (a, b) -> realV(a.value + b.value)),
-    Primitive("-", (a, b) -> realV(a.value - b.value)),
-    Primitive("<=", (a, b) -> boolV(a.value <= b.value)),
-    Primitive("<", (a, b) -> boolV(a.value < b.value)),
-    Primitive(">=", (a, b) -> boolV(a.value >= b.value)),
-    Primitive(">", (a, b) -> boolV(a.value > b.value)),
-]
-primitiveEnv = map(p -> Binding(p.name, primitiveV(p.name)), primitives)
-
-function primitiveGet(primitives, name)
-    (first, rest) = Iterators.peel(primitives)
-    if first.name == name
-        return first.body
+# Returns a Float64 or throws an error
+function realOrError(value::Value)
+    if isa(value, realV)
+        return value.value
     end
-    return primitiveGet(rest, name)
+    throw(DXUQError("Expected a number."))
+end
+
+# If value is a boolV, returns a Boolean, otherwise throws an error.
+function boolOrError(value::Value)
+    if isa(value, boolV)
+        return value.value
+    end
+    throw(DXUQError("Expected a boolean."))
+end
+
+# Returns true if the two values are equal. Doesn't currently follow the defined rules of DXUQ.
+function primitiveEqual(a::Value, b::Value)::Value
+    return boolV(a == b)
+end
+
+# Returns a / b, unless b is 0, in which case an exception is thrown.
+function primitiveDivide(a::Value, b::Value)::Value
+    dividend = realOrError(a)
+    divisor = realOrError(b)
+    if divisor == 0 
+        throw(DXUQError("Divide by zero"))
+    end
+    return realV(dividend / divisor)
+end
+
+# Implements printing. Returns void.
+function primitivePrint(values...)::Value
+    for value in values
+        print(printable(value))
+    end
+    return voidV()
+end
+
+# Implements the begin function, we basically returns the result of evaluating the last arguments.
+function primitiveBegin(values...)::Value
+    return last(values)
+end
+
+# A dictionary of primitives.
+primitives = Dict([
+    "+" => Primitive("+", (a, b) -> realV(realOrError(a) + realOrError(b))),
+    "-" => Primitive("-", (a, b) -> realV(realOrError(a) - realOrError(b))),
+    "*" => Primitive("*", (a, b) -> realV(realOrError(a) * realOrError(b))),
+    "/" => Primitive("/", primitiveDivide),
+    "<=" => Primitive("<=", (a, b) -> boolV(realOrError(a) <= realOrError(b))),
+    "<" => Primitive("<", (a, b) -> boolV(realOrError(a) < realOrError(b))),
+    ">=" => Primitive(">=", (a, b) -> boolV(realOrError(a) >= realOrError(b))),
+    ">" => Primitive(">", (a, b) -> boolV(realOrError(a) > realOrError(b))),
+    "not" => Primitive("not", (a) -> boolV(!boolOrError(a))),
+    "equal?" => Primitive("equal?", primitiveEqual),
+    "print" => Primitive("print", primitivePrint),
+    "begin" => Primitive("begin", primitiveBegin),
+])
+
+# Returns the primitives as they'd be defined in an environment.
+primitiveEnv = map(p -> Binding(p.name, primitiveV(p.name)), values(primitives))
+
+# Looks up and returns a primitive's body. Throws an error if no primitive exists.
+function primitiveGet(primitives, name)
+    primitive = primitives[name]
+    if primitive == nothing 
+        throw(DXUQError("Undefined primitive: ", name))
+    end
+    return primitive.body
 end
 
 # ==============================
 # Environment functions
 # ==============================
 
-
-function envGet(env, symbol::Symbol)::Value # Yes, the first argument is missing a type...
-    (first, rest) = Iterators.peel(env)
-    if first.name == symbol
-        return first.value 
+# Get a value from the environment. Throws an error if the symbol doesn't exist.
+function envGet(env::Env, symbol::Symbol)::Value
+    index = findfirst(binding -> binding.name == symbol, env)
+    if index == nothing
+        throw(DXUQError("Undefined symbol: ", symbol))
     end
-    return envGet(rest, symbol)
+    return env[index].value
+end
+
+# Sets the value of the symbol in the environment.
+function envSet!(env::Env, symbol::Symbol, value::Value)
+    index = findfirst(binding -> binding.name == symbol, env)
+    if index == nothing
+        throw(DXUQError("Undefined symbol: ", symbol))
+    end
+    env[index].value = value
 end
 
 # ==============================
 # Parsing
 # ==============================
 
+# Parses the SExpression returning an ExprC.
 function dxuqParse(expression::SExpression)::ExprC
+
+    # Helper for DXUQParse. Returns true if symbol is an SymbolSExp and its name is name.
+    function isSymbol(symbol::SExpression, name::String)::Bool
+        return isa(symbol, SymbolSExp) && symbol.name == name
+    end
+
+    # Helper for DXUQParse. Builds an array of let assignments.
+    function buildLetDeclarations(declarations::SubArray{SExpression})::Array{NamedTuple}
+        output = Vector()
+        for expression in declarations
+            if (isa(expression, ArraySExp)
+                && length(expression.values) == 3
+                && isa(expression.values[1], SymbolSExp)
+                && isSymbol(expression.values[2], "="))
+                name = expression.values[1].name
+                body = dxuqParse(expression.values[3])
+                tuple = (symbol=name, body=body)
+                push!(output, tuple)
+            else
+                throw(DXUQError("Bad let synyax"))
+            end
+        end
+        return output
+    end
+
     if isa(expression, NumberSExp) 
         return valueC(realV(expression.value))
-    elseif isa(expression, StringSExp)
+    end
+    if isa(expression, StringSExp)
         return valueC(stringV(expression.value))
-    elseif isa(expression, SymbolSExp)
+    end
+    if isa(expression, SymbolSExp)
         return idC(expression.name)
-    elseif (isa(expression, ArraySExp) 
+    end
+    if (isa(expression, ArraySExp)
             && length(expression.values) == 3
-            && isa(expression.values[1], SymbolSExp)
-            && expression.values[1].name == "fn"
+            && isSymbol(expression.values[2], ":="))
+        return setC(expression.values[1].name, dxuqParse(expression.values[3]))
+    end
+    if (isa(expression, ArraySExp) 
+            && length(expression.values) == 3
+            && isSymbol(expression.values[1], "fn")
             && isa(expression.values[2], ArraySExp))
         params = map(symbolExpression -> symbolExpression.name, expression.values[2].values)
         body = dxuqParse(expression.values[3])
         return lambdaC(params,  body)
-    elseif (isa(expression, ArraySExp) 
+    end
+    if (isa(expression, ArraySExp) 
             && length(expression.values) == 4
-            && isa(expression.values[1], SymbolSExp)
-            && expression.values[1].name == "if")
+            && isSymbol(expression.values[1], "if"))
         return conditionalC(dxuqParse(expression.values[2]), dxuqParse(expression.values[3]), dxuqParse(expression.values[4]))
-    elseif (isa(expression, ArraySExp)
+    end
+    if (isa(expression, ArraySExp)
+            && length(expression.values) >= 4
+            && isSymbol(expression.values[1], "let"))
+        inIndex = findfirst(a -> isSymbol(a, "in"), expression.values)
+        if (inIndex != nothing
+            && length(expression.values) == inIndex + 1)
+            decls = buildLetDeclarations(view(expression.values, 2:inIndex - 1))
+            body = dxuqParse(expression.values[inIndex + 1])
+            return appC(lambdaC(map(tuple -> tuple.symbol, decls), body),
+                        map(tuple -> tuple.body, decls))
+        end
+    end
+    if (isa(expression, ArraySExp)
             && length(expression.values) > 0)
         body = dxuqParse(expression.values[1])
         argumentLength = length(expression.values)
@@ -272,35 +439,68 @@ function dxuqParse(expression::SExpression)::ExprC
         arguments = map(expr -> dxuqParse(expr), rawArguments)
         return appC(body, arguments)
     end
-    error("DXUQ: Error: Syntax error!")
+    throw(DXUQError("Syntax error!"))
 end
 
+# Lexically parses and then symantically parses string.
 function dxuqParse(expression::String)::ExprC
     exp = lex(expression)
-    #println(exp)
     return dxuqParse(exp)
 end
 
+# Returns list of ExprC as a concatenated, human readable-ish form.
+function unparseList(expressions::Array{ExprC})::String
+    string = ""
+
+    for expression in expressions
+        if length(string) > 0
+            string = string * " " * unparse(expression)
+        else
+            string = unparse(expression)
+        end
+    end
+    return string
+end
+
+# Returns ExprC in human readable form.
+function unparse(expression::ExprC)::String
+    if isa(expression, valueC)
+        return serialize(expression.value)
+    elseif isa(expression, idC)
+        return expression.name
+    elseif isa(expression, setC) 
+        return string("{", expression.variable, " := ", unparse(expression.argument), "}")
+    elseif isa(expression, appC)
+        args = expression.arguments
+        if length(args) == 0
+            return string("{", unparse(expression.func), "}")
+        end
+        return string("{", unparse(expression.func), " ", unparseList(args), "}")
+    elseif isa(expression, lambdaC)
+        return string("{fn {", join(expression.args, " "), "} ", unparse(expression.body), "}")
+    end
+    throw(DXUQError("Couldn't unparse: ", expression))
+end
+
 #println(dxuqParse("1"))
-@assert dxuqParse("1") == valueC(realV(1.0))
-println(dxuqParse("\"hi mom\""))
-@assert dxuqParse("\"hi mom\"") == valueC(stringV("hi mom"))
-println(dxuqParse("+"))
-@assert dxuqParse("+") == idC("+")
-println(dxuqParse("{+ 1 2}"))
-# TODO: Not equalling, not sure why. Not worried right now.
-#@assert dxuqParse("{+ 1 2}") == appC(idC("+"), ExprC[valueC(realV(1.0)), valueC(realV(2.0))])
-println(dxuqParse("{fn {x y} {+ x y}}"))
-println(dxuqParse("{{fn {x y} {+ x y}} 3 4}"))
-println(dxuqParse("{if {<= 1 2} \"a\" \"b\"}"))
+#println(dxuqParse("\"hi mom\""))
+#println(dxuqParse("+"))
+#println(dxuqParse("{+ 1 2}"))
+#println(dxuqParse("{fn {x y} {+ x y}}"))
+#println(dxuqParse("{{fn {x y} {+ x y}} 3 4}"))
+#println(dxuqParse("{if {<= 1 2} \"a\" \"b\"}"))
 
 # ==============================
 # Interpretation
 # ==============================
 
+# Interpres expression, return the expression's result as a Value
 function interp(expression::ExprC, env::Env)::Value
     if isa(expression, valueC)
         return expression.value
+    elseif isa(expression, setC)
+        envSet!(env, expression.variable, interp(expression.argument, env))
+        return voidV()
     elseif isa(expression, conditionalC)
         if interp(expression.condition, env).value
             return interp(expression.ifblock, env)
@@ -316,6 +516,7 @@ function interp(expression::ExprC, env::Env)::Value
     end
 end
 
+# Deals with calling a function for interp() above.
 function interpFunction(func::ExprC, arguments::Array{ExprC}, env::Env)::Value
     closure = interp(func, env)
     if isa(closure, closureV)
@@ -343,39 +544,65 @@ function topInterp(program::String)::String
     return serialize(interp(expression, rootEnv))
 end
 
-@assert interp(
+# ==============================
+# Unit Tests
+# ==============================
+
+@test interp(
     valueC(realV(1)),
     rootEnv
 ) == realV(1)
 
-@assert interp(
+@test interp(
     conditionalC(idC("true"), valueC(realV(1)), valueC(realV(0))),
     rootEnv
 ) == realV(1)
 
-@assert interp(
+@test interp(
     conditionalC(idC("false"), valueC(realV(1)), valueC(realV(0))),
     rootEnv
 ) == realV(0)
 
-@assert interp(
+@test interp(
     appC(lambdaC(["x", "y"], appC(idC("+"), [idC("x"), idC("y")])), [valueC(realV(4)), valueC(realV(5))]),
     rootEnv
 ) == realV(9)
 
-@assert interp(
+@test interp(
     appC(lambdaC(["x", "y"], appC(idC("-"), [idC("x"), idC("y")])), [valueC(realV(4)), valueC(realV(5))]),
     rootEnv
 ) == realV(-1)
 
-@assert topInterp("{+ 1 1}") == "2.0"
+@test_throws DXUQError dxuqParse("{{+ 1 1}")
+@test_throws DXUQError dxuqParse("{+ 1 1}}")
+@test dxuqParse("1") == valueC(realV(1.0))
+@test dxuqParse("\"hi mom\"") == valueC(stringV("hi mom"))
+@test dxuqParse("+") == idC("+")
+# TODO: Not equalling, not sure why. Not worried about it right now.
+#@test dxuqParse("{+ 1 2}") == appC(idC("+"), ExprC[valueC(realV(1.0)), valueC(realV(2.0))])
+@test topInterp("{+ 1 1}") == "2.0"
+@test topInterp("{- 2 1}") == "1.0"
+@test topInterp("{* 2 2}") == "4.0"
+@test topInterp("{/ 2 2}") == "1.0"
+@test_throws DXUQError topInterp("{/ 2 0}")
+@test topInterp("{{fn {x y} {+ x y}} 3 4}") == "7.0"
+@test topInterp("{<= 1 2}") == "true"
+@test topInterp("{if {<= 1 2} \"a\" \"b\"}") == "\"a\""
+@test topInterp("{if {<= 3 2} \"a\" \"b\"}") == "\"b\""
+@test topInterp("{if {<= 2 2} \"a\" \"b\"}") == "\"a\""
+@test topInterp("{if {not {equal? 1 2}} \"a\" \"b\"}") == "\"a\""
+@test topInterp("{print 1 \"\\n\" 2 \"\\n\" 3 \"\\n\" \"hi\" \"\\n\" {fn {a b} {+ a b}} \"\\n\"}") == "Void"
+@test topInterp("{begin 1 2 3}") == "3.0"
+@test unparse(dxuqParse("{+ 1 1}")) == "{+ 1.0 1.0}"
+@test unparse(dxuqParse("{fn {a b} {+ a b}}")) == "{fn {a b} {+ a b}}"
 
-@assert topInterp("{{fn {x y} {+ x y}} 3 4}") == "7.0"
+simpleTest = """{let
+                  {f = {fn {x} {+ x 14}}}
+                  in
+                  {f 2}}
+                """
+@test unparse(dxuqParse(simpleTest)) == "{{fn {f} {f 2.0}} {fn {x} {+ x 14.0}}}"
+@test topInterp(simpleTest) == "16.0"
 
-@assert topInterp("{<= 1 2}") == "true"
-
-@assert topInterp("{if {<= 1 2} \"a\" \"b\"}") == "a"
-
-@assert topInterp("{if {<= 3 2} \"a\" \"b\"}") == "b"
-
-@assert topInterp("{if {<= 2 2} \"a\" \"b\"}") == "a"
+@test unparse(dxuqParse("{let {a = 10} in {begin {a := 5} a}}")) == "{{fn {a} {begin {a := 5.0} a}} 10.0}"
+@test topInterp("{let {a = 10} in {begin {a := 5} a}}") == "5.0"
