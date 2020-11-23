@@ -273,7 +273,7 @@ end
 ArrayOrTuple = Union{Array, Tuple}
 
 # Checks that the array passed in has count N, or throws an error
-function checkLength(name::Symbol, a::ArrayOrTuple, expected::Integer)
+function checkArgCount(name::Symbol, a::ArrayOrTuple, expected::Integer)
     if length(a) != expected
         throw(DXUQError(string("Incorrect number of parameters to '", name, "'. Expected ", expected, " got ", length(a))))
     end
@@ -287,35 +287,43 @@ function checkRange(name::Symbol, lower::Integer, upper::Integer, index::Integer
 end
 
 # Returns a Float64 or throws an error
-function realOrError(value::Value)::Real
+function realOrError(name::Symbol, value::Value)::Real
     if isa(value, realV)
         return value.value
     end
-    throw(DXUQError("Expected a number."))
+    throw(DXUQError(string(name, ": Expected a number.")))
 end
 
 # Returns a Int64 or throws an error
-function integerOrError(value::Value)::Integer
+function integerOrError(name::Symbol, value::Value)::Integer
     if isa(value, realV) && value.value == floor(value.value)
         return value.value
     end
-    throw(DXUQError("Expected an integer"))
+    throw(DXUQError(string(name, ": Expected an integer.")))
 end
 
 # If value is a boolV, returns a Boolean, otherwise throws an error.
-function boolOrError(value::Value)
+function boolOrError(name::Symbol, value::Value)
     if isa(value, boolV)
         return value.value
     end
-    throw(DXUQError("Expected a boolean."))
+    throw(DXUQError(string(name, ": Expected a boolean.")))
 end
 
 # If value is an array, return's it's values.
-function arrayOrError(value::Value)::Array{Value}
+function arrayOrError(name::Symbol, value::Value)::Array{Value}
     if value isa arrayV
         return value.values
     end
-    throw(DXUQError("Expected an array."))
+    throw(DXUQError(string(name, ": Expected an array.")))
+end
+
+# Returns a String or throws an error
+function stringOrError(name::Symbol, value::Value)::String
+    if isa(value, stringV)
+        return value.value
+    end
+    throw(DXUQError(string(name, ": Expected a string.")))
 end
 
 # Returns true if the two values are equal. Doesn't currently follow the defined rules of DXUQ.
@@ -325,8 +333,8 @@ end
 
 # Returns a / b, unless b is 0, in which case an exception is thrown.
 function primitiveDivide(a::Value, b::Value)::Value
-    dividend = realOrError(a)
-    divisor = realOrError(b)
+    dividend = realOrError("/", a)
+    divisor = realOrError("/", b)
     if divisor == 0 
         throw(DXUQError("Divide by zero"))
     end
@@ -348,44 +356,44 @@ end
 
 # Implements "and" with short circuiting
 function primitiveAnd(expressions::Array{ExprC}, env::Env)::Value
-    checkLength("and", expressions, 2)
-    left = boolOrError(interp(expressions[1], env))
+    checkArgCount("and", expressions, 2)
+    left = boolOrError("and", interp(expressions[1], env))
     if !left 
         return boolV(false)
     end
-    return boolV(boolOrError(interp(expressions[2], env)))
+    return boolV(boolOrError("and", interp(expressions[2], env)))
 end
 
 # Implements "or" with short circuiting
 function primitiveOr(expressions::Array{ExprC}, env::Env)::Value
-    checkLength("or", expressions, 2)
-    left = boolOrError(interp(expressions[1], env))
+    checkArgCount("or", expressions, 2)
+    left = boolOrError("or", interp(expressions[1], env))
     if left 
         return boolV(true)
     end
-    return boolV(boolOrError(interp(expressions[2], env)))
+    return boolV(boolOrError("or", interp(expressions[2], env)))
 end
 
 # Implements "xor" with short circuiting
 function primitiveXor(values...)::Value
-    checkLength("xor", values, 2)
-    left = boolOrError(values[1])
-    right = boolOrError(values[2])
+    checkArgCount("xor", values, 2)
+    left = boolOrError("xor", values[1])
+    right = boolOrError("xor", values[2])
     return boolV((left && !right) || (!left && right))
 end
 
 # Implements "if" with short circuiting
 function primitiveIf(expressions::Array{ExprC}, env::Env)::Value
-    checkLength("if", expressions, 3)
-    if boolOrError(interp(expressions[1], env))
+    checkArgCount("if", expressions, 3)
+    if boolOrError("if", interp(expressions[1], env))
         return interp(expressions[2], env)
     end
     return interp(expressions[3], env)
 end
 
 function primitiveNewArray(values...)::Value
-    checkLength("new-array", values, 2)
-    count = integerOrError(values[1])
+    checkArgCount("new-array", values, 2)
+    count = integerOrError("new-array", values[1])
     if count <= 1
         throw(DXUQError("Arrays must have at least one element"))
     end
@@ -400,34 +408,56 @@ function primitiveArray(values...)::Value
 end
 
 function primitiveARef(values...)::Value
-    checkLength("aref", values, 2)
-    arrayValues = arrayOrError(values[1])
-    index = integerOrError(values[2])
+    checkArgCount("aref", values, 2)
+    arrayValues = arrayOrError("aref", values[1])
+    index = integerOrError("aref", values[2])
     checkRange("aref", 0, length(arrayValues), index)
     return arrayValues[index + 1] # Julia indexes from 1.
 end
 
 function primitiveASet!(values...)::Value
-    checkLength("aset!", values, 3)
-    arrayValues = arrayOrError(values[1])
-    index = integerOrError(values[2])
+    checkArgCount("aset!", values, 3)
+    arrayValues = arrayOrError("aset!", values[1])
+    index = integerOrError("aset!", values[2])
     checkRange("aset!", 0, length(arrayValues), index)
     existing = arrayValues[index + 1] # Julia indexes from 1.
     arrayValues[index + 1] = values[3]
     return existing
 end
 
+# (define (primitive-substring [values : (Listof Value)] [env : Env]) : Value
+#   (check-arg-count 'aref values 3)
+#   (let ([value (string-or-error 'substring (first values))]
+#         [startIndex (integer-or-error 'substring (second values))]
+#         [endIndex (integer-or-error 'substring (third values))])
+#     (check-range 'substring startIndex 0 (string-length value) "startIndex")
+#     (check-range 'substring endIndex startIndex (+ (string-length value) 1) "endIndex")
+#     (stringV (substring value startIndex endIndex))))
+
+# Gets the substring of string from startIndex to endIndex. Raises an error if input isn't a string or
+# indexes are out of range.
+# DXUQ Syntax: {substring <string> <start> <end>}
+function primitiveSubstring(values...)::Value
+    checkArgCount("substring", values, 3)
+    value = stringOrError("substring", values[1])
+    startIndex = integerOrError("substring", values[2])
+    endIndex = integerOrError("substring", values[3])
+    checkRange("substring", 0, length(value), startIndex)
+    checkRange("substring", startIndex, length(value) + 1, endIndex)
+    return stringV(SubString(value, startIndex + 1, endIndex))
+end
+
 # A dictionary of primitives.
 primitives = Dict([
-    "+"         => Primitive("+",         PrimitiveValueBody((a, b) -> realV(realOrError(a) + realOrError(b)))),
-    "-"         => Primitive("-",         PrimitiveValueBody((a, b) -> realV(realOrError(a) - realOrError(b)))),
-    "*"         => Primitive("*",         PrimitiveValueBody((a, b) -> realV(realOrError(a) * realOrError(b)))),
+    "+"         => Primitive("+",         PrimitiveValueBody((a, b) -> realV(realOrError("+", a) + realOrError("+", b)))),
+    "-"         => Primitive("-",         PrimitiveValueBody((a, b) -> realV(realOrError("-", a) - realOrError("-", b)))),
+    "*"         => Primitive("*",         PrimitiveValueBody((a, b) -> realV(realOrError("*", a) * realOrError("*", b)))),
     "/"         => Primitive("/",         PrimitiveValueBody(primitiveDivide)),
-    "<="        => Primitive("<=",        PrimitiveValueBody((a, b) -> boolV(realOrError(a) <= realOrError(b)))),
-    "<"         => Primitive("<",         PrimitiveValueBody((a, b) -> boolV(realOrError(a) < realOrError(b)))),
-    ">="        => Primitive(">=",        PrimitiveValueBody((a, b) -> boolV(realOrError(a) >= realOrError(b)))),
-    ">"         => Primitive(">",         PrimitiveValueBody((a, b) -> boolV(realOrError(a) > realOrError(b)))),
-    "not"       => Primitive("not",       PrimitiveValueBody((a) -> boolV(!boolOrError(a)))),
+    "<="        => Primitive("<=",        PrimitiveValueBody((a, b) -> boolV(realOrError("<=", a) <= realOrError("<=", b)))),
+    "<"         => Primitive("<",         PrimitiveValueBody((a, b) -> boolV(realOrError("<", a) < realOrError("<", b)))),
+    ">="        => Primitive(">=",        PrimitiveValueBody((a, b) -> boolV(realOrError(">=", a) >= realOrError(">=", b)))),
+    ">"         => Primitive(">",         PrimitiveValueBody((a, b) -> boolV(realOrError(">", a) > realOrError(">", b)))),
+    "not"       => Primitive("not",       PrimitiveValueBody((a) -> boolV(!boolOrError("not", a)))),
     "equal?"    => Primitive("equal?",    PrimitiveValueBody(primitiveEqual)),
     "print"     => Primitive("print",     PrimitiveValueBody(primitivePrint)),
     "begin"     => Primitive("begin",     PrimitiveValueBody(primitiveBegin)),
@@ -439,6 +469,7 @@ primitives = Dict([
     "array"     => Primitive("array",     PrimitiveValueBody(primitiveArray)),
     "aref"      => Primitive("aref",      PrimitiveValueBody(primitiveARef)),
     "aset!"     => Primitive("aset!",     PrimitiveValueBody(primitiveASet!)),
+    "substring" => Primitive("substring", PrimitiveValueBody(primitiveSubstring)),
 ])
 
 # Returns the primitives as they'd be defined in an environment.
@@ -753,3 +784,15 @@ recursionTest = """
     """
 
 @test topInterp(recursionTest) == "6.0"
+
+# Test String
+
+@test topInterp("""{equal? {substring "hi mom" 0 2} "hi"}""") == "true"
+@test topInterp("""{equal? {substring "hi mom" 0 6} "hi mom"}""") == "true"
+@test_throws DXUQError topInterp("""{substring "hi mom" -1 2}""")
+@test_throws DXUQError topInterp("""{substring "hi mom" 10 2}""")
+@test_throws DXUQError topInterp("""{substring "hi mom" 0 -1}""")
+@test_throws DXUQError topInterp("""{substring "hi mom" 0 10}""")
+@test_throws DXUQError topInterp("""{substring "hi mom" 2 0}""")
+@test_throws DXUQError topInterp("""{substring true 0 2}""")
+@test_throws DXUQError topInterp("""{substring "abcd" 0 0.23}""")
