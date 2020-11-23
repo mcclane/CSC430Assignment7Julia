@@ -394,14 +394,14 @@ end
 function primitiveNewArray(values...)::Value
     checkArgCount("new-array", values, 2)
     count = integerOrError("new-array", values[1])
-    if count <= 1
+    if count < 1
         throw(DXUQError("Arrays must have at least one element"))
     end
     return arrayV(fill(values[2], count))
 end
 
 function primitiveArray(values...)::Value
-    if length(values) <= 1
+    if length(values) < 1
         throw(DXUQError("Arrays must have at least one element"))
     end
     return arrayV([i for i in values])
@@ -424,15 +424,6 @@ function primitiveASet!(values...)::Value
     arrayValues[index + 1] = values[3]
     return existing
 end
-
-# (define (primitive-substring [values : (Listof Value)] [env : Env]) : Value
-#   (check-arg-count 'aref values 3)
-#   (let ([value (string-or-error 'substring (first values))]
-#         [startIndex (integer-or-error 'substring (second values))]
-#         [endIndex (integer-or-error 'substring (third values))])
-#     (check-range 'substring startIndex 0 (string-length value) "startIndex")
-#     (check-range 'substring endIndex startIndex (+ (string-length value) 1) "endIndex")
-#     (stringV (substring value startIndex endIndex))))
 
 # Gets the substring of string from startIndex to endIndex. Raises an error if input isn't a string or
 # indexes are out of range.
@@ -517,6 +508,16 @@ function envSet!(env::Env, symbol::Symbol, value::Value)
 end
 
 # ==============================
+# Protected Symbols
+# ==============================
+
+protectedSymbols = Set(["fn", "let", "in", "var", ":="])
+
+function isProtectedSymbol(name::String)::Bool
+    return in(name, protectedSymbols)
+end
+
+# ==============================
 # Parsing
 # ==============================
 
@@ -536,6 +537,9 @@ function dxuqParse(expression::SExpression)::ExprC
                 && isa(expression.values[1], SymbolSExp)
                 && isSymbol(expression.values[2], "="))
                 name = expression.values[1].name
+                if isProtectedSymbol(name) 
+                    throw(DXUQError(string("'", name, "' is protected.")))
+                end
                 body = dxuqParse(expression.values[3])
                 # If the right hand side is a closure, then append itself to its environment. This allows recursion.
                 if body isa valueC && body.value isa closureV
@@ -558,6 +562,9 @@ function dxuqParse(expression::SExpression)::ExprC
         return valueC(stringV(expression.value))
     end
     if isa(expression, SymbolSExp)
+        if isProtectedSymbol(expression.name) 
+            throw(DXUQError(string("'", expression.name, "' is protected.")))
+        end
         return idC(expression.name)
     end
     if (isa(expression, ArraySExp)
@@ -571,6 +578,9 @@ function dxuqParse(expression::SExpression)::ExprC
             && isa(expression.values[2], ArraySExp))
         params = map(symbolExpression -> symbolExpression.name, expression.values[2].values)
         body = dxuqParse(expression.values[3])
+        if !allunique(params) 
+            throw(DXUQError("Not all parameter names are unique in lambda definition."))
+        end
         return lambdaC(params,  body)
     end
     if (isa(expression, ArraySExp)
@@ -592,7 +602,7 @@ function dxuqParse(expression::SExpression)::ExprC
         if argumentLength - 1 > 0
             rawArguments = view(expression.values, 2:length(expression.values))
         else
-            rawArguments = Array{ExprC}()
+            rawArguments = []
         end
         arguments = map(expr -> dxuqParse(expr), rawArguments)
         return appC(body, arguments)
@@ -748,9 +758,21 @@ simpleTest = """
     in
     {f 2}}
 """
+badProg1 = """{let
+                {f = {fn {x x} {+ x x}}}
+                in
+                {f 2 3}})
+           """
+badProg2 = """{let
+                {in = {fn {x y} {- x y}}}
+                in
+                {+ 2 3}}
+           """
 
 @test unparse(dxuqParse(simpleTest)) == "{{fn {f} {f 2.0}} {fn {x} {+ x 14.0}}}"
 @test topInterp(simpleTest) == "16.0"
+@test_throws DXUQError topInterp(badProg1)
+@test_throws DXUQError topInterp(badProg2)
 
 @test unparse(dxuqParse("{let {a = 10} in {begin {a := 5} a}}")) == "{{fn {a} {begin {a := 5.0} a}} 10.0}"
 @test topInterp("{let {a = 10} in {begin {a := 5} a}}") == "5.0"
@@ -767,12 +789,12 @@ simpleTest = """
 @test topInterp("{xor true false}") == "true"
 @test topInterp("{xor false true}") == "true"
 @test topInterp("{xor false false}") == "false"
-@test topInterp("{aref {array 1 2 3 4 5} 0}") == "1.0"
-@test topInterp("{aref {array 1 2 3 4 5} 2}") == "3.0"
-@test topInterp("{aref {array 1 2 3 4 5} 4}") == "5.0"
-@test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} 5}")
-@test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} -1}")
-@test topInterp("{let {a = {array 1 2 3 4 5}} in {begin {aset! a 2 \"a\"} {aref a 2}}}") == "\"a\""
+# @test topInterp("{aref {array 1 2 3 4 5} 0}") == "1.0"
+# @test topInterp("{aref {array 1 2 3 4 5} 2}") == "3.0"
+# @test topInterp("{aref {array 1 2 3 4 5} 4}") == "5.0"
+# @test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} 5}")
+# @test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} -1}")
+# @test topInterp("{let {a = {array 1 2 3 4 5}} in {begin {aset! a 2 \"a\"} {aref a 2}}}") == "\"a\""
 
 recursionTest = """
     {let
@@ -785,6 +807,23 @@ recursionTest = """
 
 @test topInterp(recursionTest) == "6.0"
 
+# Test arrays
+
+@test topInterp("""{equal? {new-array 5 0} {new-array 5 0}}""") == "false"
+@test topInterp("""{let {a = {array 1 2 3}} in {equal? a a}}""") == "true"
+@test_throws DXUQError topInterp("""{new-array 0 0}""")
+@test topInterp("""{array 1 2 3}""") == "#<array>"
+@test_throws DXUQError topInterp("""{array}""")
+@test_throws DXUQError topInterp("""{aref {array 1 2 3} -1}""")
+@test topInterp("""{aref {array 1 2 3} 0}""") == "1.0"
+@test topInterp("""{aref {array 1 2 3} 1}""") == "2.0"
+@test topInterp("""{aref {array 1 2 3} 2}""") == "3.0"
+@test_throws DXUQError topInterp("""{aref {array 1 2 3} 3}""")
+@test_throws DXUQError topInterp("""{aref true 3}""")
+@test topInterp("""{let {a = {array 1 2 3}} in {begin {aset! a 1 4} {aref a 1}}}""") == "4.0"
+@test_throws DXUQError topInterp("""{let {l = "not an array"} in {aset! l 2 "mom"}}""")
+@test_throws DXUQError topInterp("""{aset! {+ 1 1} 2 "mom"}""")
+
 # Test String
 
 @test topInterp("""{equal? {substring "hi mom" 0 2} "hi"}""") == "true"
@@ -796,3 +835,57 @@ recursionTest = """
 @test_throws DXUQError topInterp("""{substring "hi mom" 2 0}""")
 @test_throws DXUQError topInterp("""{substring true 0 2}""")
 @test_throws DXUQError topInterp("""{substring "abcd" 0 0.23}""")
+
+# Try some complex tests.
+
+# Defines the body of the "while" as an Sexp, which can be passed to parse. The function accepts a
+# guard procedure and a body procedure. It calls body until guard returns false.
+whileRaw = """{fn {guard body} 
+                {let {while-internal = "bogus"}
+                in
+                {begin
+                  {while-internal := 
+                                  {fn {guard body}
+                                      {if {guard}
+                                          {begin {body} {while-internal guard body}}
+                                          void}}}
+                  {while-internal guard body}}}}
+           """ 
+
+begin
+    testEnv = envPrepend(rootEnv, Binding("while", interp(dxuqParse(whileRaw), rootEnv)))
+    whileTestProg = """
+                    {let {x = 5}
+                      in
+                      {while {fn {} {> x 0}}
+                        {fn {} {x := {- x 1}}}}}
+                    """
+    @test interp(dxuqParse(whileTestProg), testEnv) == voidV()
+end
+
+# Defines the body of in-order as an Sexp, which can be passed to parse. in-order itself takes a list
+# and a length, and returns true if the list is in ascending order, or false otherwise.
+inOrderRaw = """{fn {input size}
+                      {let {in-order-internal = "bogus"}
+                        in
+                        {begin
+                          {in-order-internal := {fn {input offset size}
+                                                    {if {<= size {+ offset 1}}
+                                                        true
+                                                        {if {<= {aref input offset} {aref input {+ offset 1}}}
+                                                            {in-order-internal input {+ offset 1} size}
+                                                            false}}}}
+                          {in-order-internal input 0 size}
+                          }}}"""
+
+# This is fun. We basically extend the root environment with a closureV that's bound to the name in-order.
+# This then allows us to write DXUQ code that uses in-order as if it was a built-in.
+begin
+    inOrderEnv = envPrepend(rootEnv, Binding("in-order", interp(dxuqParse(inOrderRaw), rootEnv)))
+
+    @test interp(dxuqParse("""{in-order {array 1} 1}"""), inOrderEnv) == boolV(true)
+    @test interp(dxuqParse("""{in-order {array 1 2 3 4 5 6} 6}"""), inOrderEnv) == boolV(true)
+    @test interp(dxuqParse("""{in-order {array 1 2 3 4 7 6} 6}"""), inOrderEnv) == boolV(false)
+    @test interp(dxuqParse("""{+ {if {in-order {array 3 6 8} 3} 1 0}
+                                   {if {in-order {array 6 7 3 8} 4} 0 2}}"""), inOrderEnv) == realV(3.0)
+end
