@@ -457,11 +457,21 @@ end
 # Environment functions
 # ==============================
 
+# Appends binding to a new env and returns it
+function envPrepend(env::Env, binding::Binding)::Env
+    newEnv = vcat(binding, env)
+end
+
+# Appends binding to a new env and returns it
+function envPrepend(env::Env, binding::Array{Binding})::Env
+    newEnv = vcat(binding, env)
+end
+
 # Get a value from the environment. Throws an error if the symbol doesn't exist.
 function envGet(env::Env, symbol::Symbol)::Value
     index = findfirst(binding -> binding.name == symbol, env)
     if index == nothing
-        throw(DXUQError("Undefined symbol: ", symbol))
+        throw(DXUQError(string("Undefined symbol: ", symbol)))
     end
     return env[index].value
 end
@@ -481,7 +491,6 @@ end
 
 # Parses the SExpression returning an ExprC.
 function dxuqParse(expression::SExpression)::ExprC
-
     # Helper for DXUQParse. Returns true if symbol is an SymbolSExp and its name is name.
     function isSymbol(symbol::SExpression, name::String)::Bool
         return isa(symbol, SymbolSExp) && symbol.name == name
@@ -497,6 +506,11 @@ function dxuqParse(expression::SExpression)::ExprC
                 && isSymbol(expression.values[2], "="))
                 name = expression.values[1].name
                 body = dxuqParse(expression.values[3])
+                # If the right hand side is a closure, then append itself to its environment. This allows recursion.
+                if body isa valueC && body.value isa closureV
+                    closure = body.value
+                    body = valueC(closureV(closure.args, closure.body, envPrepend(closure.env, Binding(name, body))))
+                end
                 tuple = (symbol=name, body=body)
                 push!(output, tuple)
             else
@@ -628,8 +642,7 @@ function interpFunction(func::ExprC, arguments::Array{ExprC}, env::Env)::Value
     closure = interp(func, env)
     if isa(closure, closureV)
         argValues = map(a -> interp(a, env), arguments)
-        newEnv = vcat(closure.env, map(t -> Binding(t[1], t[2]), zip(closure.args, argValues)))
-        return interp(closure.body, newEnv)
+        return interp(closure.body, envPrepend(env, map(t -> Binding(t[1], t[2]), zip(closure.args, argValues))))
     elseif isa(closure, primitiveV)
         body = primitiveGet(primitives, closure.name)
         if body isa PrimitiveValueBody
@@ -642,7 +655,7 @@ function interpFunction(func::ExprC, arguments::Array{ExprC}, env::Env)::Value
 end
 
 # Represents the root environment
-rootEnv = vcat(
+rootEnv = envPrepend(
     [
         Binding("true", boolV(true)),
         Binding("false", boolV(false)),
@@ -698,11 +711,13 @@ end
 @test unparse(dxuqParse("{+ 1 1}")) == "{+ 1.0 1.0}"
 @test unparse(dxuqParse("{fn {a b} {+ a b}}")) == "{fn {a b} {+ a b}}"
 
-simpleTest = """{let
-                  {f = {fn {x} {+ x 14}}}
-                  in
-                  {f 2}}
-                """
+simpleTest = """
+{let
+    {f = {fn {x} {+ x 14}}}
+    in
+    {f 2}}
+"""
+
 @test unparse(dxuqParse(simpleTest)) == "{{fn {f} {f 2.0}} {fn {x} {+ x 14.0}}}"
 @test topInterp(simpleTest) == "16.0"
 
@@ -727,3 +742,14 @@ simpleTest = """{let
 @test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} 5}")
 @test_throws DXUQError topInterp("{aref {array 1 2 3 4 5} -1}")
 @test topInterp("{let {a = {array 1 2 3 4 5}} in {begin {aset! a 2 \"a\"} {aref a 2}}}") == "\"a\""
+
+recursionTest = """
+    {let
+        {factorial = {fn {n} {if {<= n 0} 
+                                 1 
+                                 {* n {factorial {- n 1}}}}}}
+        in
+        {factorial 3}}
+    """
+
+@test topInterp(recursionTest) == "6.0"
