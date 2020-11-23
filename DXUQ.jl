@@ -12,6 +12,16 @@ Symbol = String
 #
 # Defines the lexical pieces of the langauge
 #
+# NOTE: Patterns follow the definition for the Swift language, with slight enhancements to support additional
+# characters allows by DXUQ.
+#
+# See: https://docs.swift.org/swift-book/ReferenceManual/LexicalStructure.html#grammar_interpolated-string-literal
+#
+# Further Note: The full Swift string syntax is not supported, namely multi-line strings. Likewise, these expressions
+# aren't quite as bad as they seem, they just look a little nasty due to containing a lot of unicode characters.
+# Finally, these were semi-automatically generated from smaller expressions that were combined to produce the long
+# expressions you see below.
+#
 openParenRx = r"[\({\[]"
 closeParenRx = r"[\)}\]]"
 numericLiteralRx = r"(?:-?(?:(?:(?:(?:[0-9])(?:(?:(?:[0-9]))|_)*)(?:\.(?:(?:[0-9])(?:(?:(?:[0-9]))|_)*))?(?:(?:[eE])(?:[-+])?(?:(?:[0-9])(?:(?:(?:[0-9]))|_)*))?)|(?:0x(?:[0-9A-Fa-f])(?:(?:(?:[0-9A-Fa-f]))|_)*)(?:\.(?:[0-9A-Fa-f])(?:(?:(?:[0-9A-Fa-f]))|_)*)?(?:(?:[pP])(?:[-+])?(?:(?:[0-9])(?:(?:(?:[0-9]))|_)*))))|(?:-?(?:(?:(?:(?:[0-9])(?:(?:(?:[0-9]))|_)*)|(?:0x(?:[0-9A-Fa-f])(?:(?:(?:[0-9A-Fa-f]))|_)*)|(?:0o(?:[0-7])(?:(?:(?:[0-7]))|_)*)|(?:0b(?:[0-1])(?:(?:(?:[0-1]))|_)*))))"
@@ -112,6 +122,11 @@ function lex(input::String)::SExpression
             raw = SubString(value, 2, length(value) - 1)
             # Not efficient, but good enough for now.
             raw = replace(raw, "\\n" => "\n")
+            raw = replace(raw, "\\0" => "\0")
+            raw = replace(raw, "\\t" => "\t")
+            raw = replace(raw, "\\r" => "\r")
+            raw = replace(raw, "\\\"" => "\"")
+            raw = replace(raw, "\\'" => "\'")
             addExpression(StringSExp(raw))
         elseif captures[5] != nothing
             addExpression(SymbolSExp(submatch.match))
